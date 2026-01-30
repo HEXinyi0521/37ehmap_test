@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>37EH Emotion Map (A05B05 / A01C01)</title>
+
+  <!-- Mapbox GL JS (CDN) -->
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet" />
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+
+  <style>
+    body { margin:0; padding:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    #map { position:absolute; top:0; bottom:0; width:100%; }
+
+    .panel {
+      position:absolute; top:12px; left:12px; z-index:2;
+      background: rgba(255,255,255,0.95);
+      border-radius: 14px;
+      padding: 12px 12px 10px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+      width: 320px;
+    }
+
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+    .row label { font-size: 13px; color:#222; }
+    .row .hint { font-size: 12px; color:#666; }
+
+    .seg { display:flex; gap:6px; flex-wrap:wrap; }
+    .btn {
+      border: 1px solid #ddd; background:#fff; color:#222;
+      padding: 6px 10px; border-radius: 999px;
+      cursor:pointer; font-size: 12px;
+      transition: 0.15s ease;
+      user-select:none;
+    }
+    .btn.active { border-color:#111; background:#111; color:#fff; }
+    .btn.small { padding: 5px 9px; font-size: 12px; }
+
+    .legend { margin-top: 10px; display:flex; flex-wrap:wrap; gap:8px; }
+    .legend-item {
+      display:flex; align-items:center; gap:7px;
+      border:1px solid #e5e5e5; border-radius: 999px;
+      padding: 6px 9px;
+      cursor:pointer;
+      user-select:none;
+      font-size: 12px;
+      background:#fff;
+    }
+    .legend-item.off { opacity:0.35; }
+    .swatch { width:12px; height:12px; border-radius: 50%; border: 1px solid rgba(0,0,0,0.15); }
+
+    .footer {
+      margin-top:10px; font-size: 11px; color:#666; line-height:1.25;
+    }
+    .footer code { font-size: 11px; }
+  </style>
+</head>
+
+<body>
+  <div id="map"></div>
+
+  <div class="panel">
+    <div class="row">
+      <div style="font-weight:700;">37EH Emotion Map</div>
+      <div class="hint">A05/B05 & A01/C01</div>
+    </div>
+
+    <div class="row">
+      <label style="font-weight:600;">Dataset</label>
+      <div class="seg" id="datasetSeg"></div>
+    </div>
+
+    <div class="row">
+      <label style="font-weight:600;">Floor</label>
+      <div class="seg" id="floorSeg"></div>
+    </div>
+
+    <div class="row" style="margin-bottom:6px;">
+      <label style="font-weight:600;">Emotions (click to toggle)</label>
+    </div>
+    <div class="legend" id="legend"></div>
+
+    <div class="footer">
+      Notes: If your GeoJSON lacks <code>floor</code>, floors are derived from <code>elevation</code> using:
+      Ground(16–20), L2(20–24), L3(24–28), L4(28–32), L5plus(32–37).
+    </div>
+  </div>
+
+<script>
+/** =========================
+ *  0) Put your Mapbox token
+ *  ========================= */
+const MAPBOX_TOKEN = "pk.eyJ1IjoiaGV4aW55aTA1MjEiLCJhIjoiY203dTdydmxmMDFndTJycXN3cHkybHY5cCJ9.vZZQOhyDe4mJUqD1YnuySQ";
+
+/** =========================
+ *  1) Config
+ *  ========================= */
+const DATASETS = [
+  { id: "A05B05", label: "A05/B05", url: "./A05B05.geojson" },
+  { id: "A01C01", label: "A01/C01", url: "./A01C01.geojson" }
+];
+
+const FLOORS = [
+  { id: "All",    label: "All" },
+  { id: "Ground", label: "Ground" },
+  { id: "L2",     label: "L2" },
+  { id: "L3",     label: "L3" },
+  { id: "L4",     label: "L4" },
+  { id: "L5plus", label: "L5+" }
+];
+
+const EMO_LIST = [
+  "Appreciation","Fascination","Joy","Fear","Mystery",
+  "Forbidden","Forgotten","Inconvenience","Intrigue","Noisy"
+];
+
+/** RdBu-like 10 colors (red-blue family). You can tweak anytime. */
+const EMO_COLORS = {
+  Appreciation:  "#b2182b",
+  Fascination:   "#d6604d",
+  Joy:           "#f4a582",
+  Fear:          "#92c5de",
+  Mystery:       "#4393c3",
+  Forbidden:     "#2166ac",
+  Forgotten:     "#67001f",
+  Inconvenience: "#053061",
+  Intrigue:      "#762a83",
+  Noisy:         "#2d004b"
+};
+
+/** =========================
+ *  2) Helpers: field picking & normalization
+ *  ========================= */
+function firstExisting(obj, keys) {
+  for (const k of keys) {
+    if (obj && obj[k] !== undefined && obj[k] !== null && String(obj[k]).trim() !== "") return k;
+  }
+  return null;
+}
+
+function normalizeEmotion(raw) {
+  // raw might be "Joy, Forgotten" or newlines
+  if (!raw) return null;
+  const s = String(raw).replace(/\n+/g, " ").trim();
+  if (!s) return null;
+
+  // find first matching token in EMO_LIST, preserving your 10-cat list
+  const lower = s.toLowerCase();
+  for (const emo of EMO_LIST) {
+    const e = emo.toLowerCase();
+    const re = new RegExp(`(^|[^a-z])${e}([^a-z]|$)`, "i");
+    if (re.test(lower)) return emo;
+  }
+
+  // fallback: split by comma and take first
+  const first = s.split(",")[0].trim();
+  return first || null;
+}
+
+function assignFloorFromElevation(elev) {
+  const x = Number(elev);
+  if (!Number.isFinite(x)) return null;
+  if (x >= 16 && x < 20) return "Ground";
+  if (x >= 20 && x < 24) return "L2";
+  if (x >= 24 && x < 28) return "L3";
+  if (x >= 28 && x < 32) return "L4";
+  if (x >= 32 && x <= 37) return "L5plus";
+  return null;
+}
+
+function computeBounds(geojson) {
+  // geojson: FeatureCollection of Points
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const f of geojson.features || []) {
+    const c = f.geometry && f.geometry.coordinates;
+    if (!c || c.length < 2) continue;
+    const x = c[0], y = c[1];
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    minX = Math.min(minX, x); minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+  }
+  if (!Number.isFinite(minX)) return null;
+  return [[minX, minY], [maxX, maxY]];
+}
+
+function preprocessGeoJSON(gj) {
+  // Make sure each feature has:
+  // - properties.emo10 : one of 10 emotions
+  // - properties.floor5 : Ground/L2/L3/L4/L5plus (or null)
+  // - properties.snippet : text snippet if exists
+  const emoKeyCandidates = ["emo_primary", "Emotions_Affect", "emotion", "Emotion", "emo_clean"];
+  const floorKeyCandidates = ["floor", "Floor", "floor5", "level", "Level"];
+  const elevKeyCandidates = ["elevation", "Elevation", "altitude", "z"];
+  const textKeyCandidates = ["matched_text", "text", "Text", "utterance", "quote", "transcript_snippet", "snippet"];
+  const pidKeyCandidates  = ["participant_id", "ParticipantID", "pid", "participant", "Participant"];
+  const t1KeyCandidates   = ["start_time_hms", "start_time", "StartTime", "start"];
+  const t2KeyCandidates   = ["end_time_hms", "end_time", "EndTime", "end"];
+
+  for (const f of gj.features || []) {
+    const p = f.properties || (f.properties = {});
+
+    const emoKey = firstExisting(p, emoKeyCandidates);
+    const floorKey = firstExisting(p, floorKeyCandidates);
+    const elevKey = firstExisting(p, elevKeyCandidates);
+
+    p.emo10 = normalizeEmotion(emoKey ? p[emoKey] : null);
+
+    // floor: prefer existing, else derive from elevation
+    let fl = null;
+    if (floorKey) fl = String(p[floorKey]).trim();
+    if (!fl && elevKey) fl = assignFloorFromElevation(p[elevKey]);
+    p.floor5 = fl || null;
+
+    const textKey = firstExisting(p, textKeyCandidates);
+    p.snippet = textKey ? String(p[textKey]).trim() : "";
+
+    const pidKey = firstExisting(p, pidKeyCandidates);
+    p.pid_show = pidKey ? String(p[pidKey]).trim() : "";
+
+    const t1Key = firstExisting(p, t1KeyCandidates);
+    const t2Key = firstExisting(p, t2KeyCandidates);
+    p.t_start = t1Key ? String(p[t1Key]).trim() : "";
+    p.t_end   = t2Key ? String(p[t2Key]).trim() : "";
+  }
+  return gj;
+}
+
+/** =========================
+ *  3) UI state
+ *  ========================= */
+let currentDatasetId = "A05B05";
+let currentFloorId = "All";
+let activeEmotions = new Set(EMO_LIST); // start with all on
+
+function buildDatasetButtons() {
+  const el = document.getElementById("datasetSeg");
+  el.innerHTML = "";
+  DATASETS.forEach(ds => {
+    const b = document.createElement("div");
+    b.className = "btn small" + (ds.id === currentDatasetId ? " active" : "");
+    b.textContent = ds.label;
+    b.onclick = () => {
+      currentDatasetId = ds.id;
+      document.querySelectorAll("#datasetSeg .btn").forEach(x => x.classList.remove("active"));
+      b.classList.add("active");
+      switchDataset(ds.id);
+    };
+    el.appendChild(b);
+  });
+}
+
+function buildFloorButtons() {
+  const el = document.getElementById("floorSeg");
+  el.innerHTML = "";
+  FLOORS.forEach(fl => {
+    const b = document.createElement("div");
+    b.className = "btn small" + (fl.id === currentFloorId ? " active" : "");
+    b.textContent = fl.label;
+    b.onclick = () => {
+      currentFloorId = fl.id;
+      document.querySelectorAll("#floorSeg .btn").forEach(x => x.classList.remove("active"));
+      b.classList.add("active");
+      applyFilters();
+    };
+    el.appendChild(b);
+  });
+}
+
+function buildLegend() {
+  const el = document.getElementById("legend");
+  el.innerHTML = "";
+  EMO_LIST.forEach(emo => {
+    const item = document.createElement("div");
+    item.className = "legend-item" + (activeEmotions.has(emo) ? "" : " off");
+    item.onclick = () => {
+      if (activeEmotions.has(emo)) activeEmotions.delete(emo);
+      else activeEmotions.add(emo);
+
+      item.classList.toggle("off", !activeEmotions.has(emo));
+      applyFilters();
+    };
+
+    const sw = document.createElement("div");
+    sw.className = "swatch";
+    sw.style.background = EMO_COLORS[emo] || "#888";
+
+    const label = document.createElement("div");
+    label.textContent = emo;
+
+    item.appendChild(sw);
+    item.appendChild(label);
+    el.appendChild(item);
+  });
+}
+
+/** =========================
+ *  4) Map init
+ *  ========================= */
+mapboxgl.accessToken = MAPBOX_TOKEN;
+
+const map = new mapboxgl.Map({
+  container: "map",
+  style: "mapbox://styles/mapbox/light-v11",  // clean, light
+  center: [103.84, 1.30], // temporary; will fit bounds after load
+  zoom: 17
+});
+
+map.addControl(new mapboxgl.NavigationControl(), "bottom-right");
+
+let dataCache = {}; // { datasetId: geojson }
+let pointLayerId = "emo-points";
+
+function emoColorExpression() {
+  // match on properties.emo10
+  // ["match", ["get","emo10"], "Appreciation","#..", ..., "#999"]
+  const expr = ["match", ["get", "emo10"]];
+  EMO_LIST.forEach(emo => {
+    expr.push(emo, EMO_COLORS[emo] || "#888");
+  });
+  expr.push("#999"); // default
+  return expr;
+}
+
+function applyFilters() {
+  if (!map.getLayer(pointLayerId)) return;
+
+  // floor filter
+  let floorFilter = true;
+  if (currentFloorId !== "All") {
+    floorFilter = ["==", ["get", "floor5"], currentFloorId];
+  }
+
+  // emotion filter
+  const emoArr = Array.from(activeEmotions);
+  let emoFilter = true;
+  if (emoArr.length === 0) {
+    // show nothing
+    emoFilter = ["==", 1, 0];
+  } else {
+    emoFilter = ["in", ["get", "emo10"], ["literal", emoArr]];
+  }
+
+  // require that emo10 exists
+  const hasEmo = ["!=", ["get", "emo10"], null];
+
+  const combined = ["all", hasEmo, floorFilter, emoFilter];
+  map.setFilter(pointLayerId, combined);
+}
+
+function attachPopup() {
+  map.on("click", pointLayerId, (e) => {
+    const f = e.features && e.features[0];
+    if (!f) return;
+    const p = f.properties || {};
+    const html = `
+      <div style="font-size:12px; line-height:1.35;">
+        <div style="font-weight:700; font-size:13px; margin-bottom:4px;">
+          ${p.emo10 || "Emotion"}
+        </div>
+        <div><b>Participant:</b> ${p.pid_show || "-"}</div>
+        <div><b>Floor:</b> ${p.floor5 || "-"}</div>
+        <div><b>Time:</b> ${(p.t_start || "-")} ${(p.t_end ? "– "+p.t_end : "")}</div>
+        ${p.snippet ? `<div style="margin-top:6px; color:#333;"><b>Snippet:</b> ${escapeHtml(p.snippet).slice(0, 260)}${p.snippet.length>260 ? "…" : ""}</div>` : ""}
+      </div>
+    `;
+    new mapboxgl.Popup({ closeButton:true, maxWidth:"360px" })
+      .setLngLat(e.lngLat)
+      .setHTML(html)
+      .addTo(map);
+  });
+
+  map.on("mouseenter", pointLayerId, () => map.getCanvas().style.cursor = "pointer");
+  map.on("mouseleave", pointLayerId, () => map.getCanvas().style.cursor = "");
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+async function loadAllDatasets() {
+  for (const ds of DATASETS) {
+    const res = await fetch(ds.url);
+    if (!res.ok) throw new Error(`Failed to load ${ds.url}: ${res.status}`);
+    const gj = preprocessGeoJSON(await res.json());
+    dataCache[ds.id] = gj;
+  }
+}
+
+function setSourceToDataset(datasetId) {
+  const gj = dataCache[datasetId];
+  if (!gj) return;
+
+  // Fit bounds nicely
+  const b = computeBounds(gj);
+  if (b) {
+    map.fitBounds(b, { padding: 80, duration: 650, maxZoom: 20 });
+  }
+
+  if (!map.getSource("pts")) {
+    map.addSource("pts", {
+      type: "geojson",
+      data: gj
+    });
+  } else {
+    map.getSource("pts").setData(gj);
+  }
+}
+
+function ensureLayers() {
+  if (map.getLayer(pointLayerId)) return;
+
+  map.addLayer({
+    id: pointLayerId,
+    type: "circle",
+    source: "pts",
+    paint: {
+      "circle-radius": [
+        "interpolate", ["linear"], ["zoom"],
+        15, 3,
+        18, 6
+      ],
+      "circle-color": emoColorExpression(),
+      "circle-opacity": 0.92,
+      "circle-stroke-color": "white",
+      "circle-stroke-width": 1.2
+    }
+  });
+
+  applyFilters();
+  attachPopup();
+}
+
+function switchDataset(datasetId) {
+  setSourceToDataset(datasetId);
+  applyFilters();
+}
+
+/** =========================
+ *  5) Boot
+ *  ========================= */
+buildDatasetButtons();
+buildFloorButtons();
+buildLegend();
+
+map.on("load", async () => {
+  if (!MAPBOX_TOKEN || MAPBOX_TOKEN.includes("PASTE_YOUR_MAPBOX_TOKEN_HERE")) {
+    alert("Please paste your Mapbox token into MAPBOX_TOKEN in index.html");
+    return;
+  }
+
+  await loadAllDatasets();
+  setSourceToDataset(currentDatasetId);
+  ensureLayers();
+});
+</script>
+</body>
+</html>
