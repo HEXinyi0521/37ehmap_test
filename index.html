@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>37EH Emotion Map (A05B05 / A01C01)</title>
+  <title>37EH Emotion Map (All Participants)</title>
 
   <!-- Mapbox GL JS (CDN) -->
   <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet" />
@@ -63,13 +63,10 @@
   <div class="panel">
     <div class="row">
       <div style="font-weight:700;">37EH Emotion Map</div>
-      <div class="hint">A05/B05 & A01/C01</div>
+      <div class="hint">All participants</div>
     </div>
 
-    <div class="row">
-      <label style="font-weight:600;">Dataset</label>
-      <div class="seg" id="datasetSeg"></div>
-    </div>
+    <!-- Dataset filter removed (single GeoJSON for all participants) -->
 
     <div class="row">
       <label style="font-weight:600;">Floor</label>
@@ -82,24 +79,22 @@
     <div class="legend" id="legend"></div>
 
     <div class="footer">
-      Notes: floors are derived from <code>elevation</code> using:
+      Notes: Floors are derived from <code>elevation</code> using:
       Ground(16–20), L2(20–24), L3(24–28), L4(28–32), L5plus(32–37).
     </div>
   </div>
 
 <script>
 /** =========================
- *  0) Put your Mapbox token
+ *  0) Mapbox token
  *  ========================= */
 const MAPBOX_TOKEN = "pk.eyJ1IjoiaGV4aW55aTA1MjEiLCJhIjoiY203dTdydmxmMDFndTJycXN3cHkybHY5cCJ9.vZZQOhyDe4mJUqD1YnuySQ";
 
 /** =========================
  *  1) Config
  *  ========================= */
-const DATASETS = [
-  { id: "A05B05", label: "A05/B05", url: "data/A05B05.geojson?v=1" },
-  { id: "A01C01", label: "A01/C01", url: "data/A01C01.geojson?v=1" }
-];
+// Single dataset (all participants)
+const DATASET = { id: "ALL", label: "All participants", url: "./16participants.geojson" };
 
 const FLOORS = [
   { id: "All",    label: "All" },
@@ -189,7 +184,7 @@ function preprocessGeoJSON(gj) {
   // - properties.emo10 : one of 10 emotions
   // - properties.floor5 : Ground/L2/L3/L4/L5plus (or null)
   // - properties.snippet : text snippet if exists
-  const emoKeyCandidates = ["emo_primary", "Emotions_Affect", "emotion", "Emotion", "emo_clean"];
+  const emoKeyCandidates = ["emo_primary", "Emotions_Affect", "emotion", "Emotion", "emo_clean", "emotion_primary"];
   const floorKeyCandidates = ["floor", "Floor", "floor5", "level", "Level"];
   const elevKeyCandidates = ["elevation", "Elevation", "altitude", "z"];
   const textKeyCandidates = ["matched_text", "text", "Text", "utterance", "quote", "transcript_snippet", "snippet"];
@@ -200,7 +195,7 @@ function preprocessGeoJSON(gj) {
   for (const f of gj.features || []) {
     const p = f.properties || (f.properties = {});
 
-    const emoKey = firstExisting(p, emoKeyCandidates);
+    const emoKey  = firstExisting(p, emoKeyCandidates);
     const floorKey = firstExisting(p, floorKeyCandidates);
     const elevKey = firstExisting(p, elevKeyCandidates);
 
@@ -229,26 +224,8 @@ function preprocessGeoJSON(gj) {
 /** =========================
  *  3) UI state
  *  ========================= */
-let currentDatasetId = "A05B05";
 let currentFloorId = "All";
 let activeEmotions = new Set(EMO_LIST); // start with all on
-
-function buildDatasetButtons() {
-  const el = document.getElementById("datasetSeg");
-  el.innerHTML = "";
-  DATASETS.forEach(ds => {
-    const b = document.createElement("div");
-    b.className = "btn small" + (ds.id === currentDatasetId ? " active" : "");
-    b.textContent = ds.label;
-    b.onclick = () => {
-      currentDatasetId = ds.id;
-      document.querySelectorAll("#datasetSeg .btn").forEach(x => x.classList.remove("active"));
-      b.classList.add("active");
-      switchDataset(ds.id);
-    };
-    el.appendChild(b);
-  });
-}
 
 function buildFloorButtons() {
   const el = document.getElementById("floorSeg");
@@ -301,24 +278,22 @@ mapboxgl.accessToken = MAPBOX_TOKEN;
 
 const map = new mapboxgl.Map({
   container: "map",
-  style: "mapbox://styles/mapbox/light-v11",  // clean, light
-  center: [103.84, 1.30], // temporary; will fit bounds after load
+  style: "mapbox://styles/mapbox/light-v11",
+  center: [103.84, 1.30],
   zoom: 17
 });
 
 map.addControl(new mapboxgl.NavigationControl(), "bottom-right");
 
-let dataCache = {}; // { datasetId: geojson }
+let dataCache = null; // GeoJSON
 let pointLayerId = "emo-points";
 
 function emoColorExpression() {
-  // match on properties.emo10
-  // ["match", ["get","emo10"], "Appreciation","#..", ..., "#999"]
   const expr = ["match", ["get", "emo10"]];
   EMO_LIST.forEach(emo => {
     expr.push(emo, EMO_COLORS[emo] || "#888");
   });
-  expr.push("#999"); // default
+  expr.push("#999");
   return expr;
 }
 
@@ -335,15 +310,12 @@ function applyFilters() {
   const emoArr = Array.from(activeEmotions);
   let emoFilter = true;
   if (emoArr.length === 0) {
-    // show nothing
-    emoFilter = ["==", 1, 0];
+    emoFilter = ["==", 1, 0]; // show nothing
   } else {
     emoFilter = ["in", ["get", "emo10"], ["literal", emoArr]];
   }
 
-  // require that emo10 exists
   const hasEmo = ["!=", ["get", "emo10"], null];
-
   const combined = ["all", hasEmo, floorFilter, emoFilter];
   map.setFilter(pointLayerId, combined);
 }
@@ -383,30 +355,22 @@ function escapeHtml(str) {
     .replaceAll("'", "&#039;");
 }
 
-async function loadAllDatasets() {
-  for (const ds of DATASETS) {
-    const res = await fetch(ds.url);
-    if (!res.ok) throw new Error(`Failed to load ${ds.url}: ${res.status}`);
-    const gj = preprocessGeoJSON(await res.json());
-    dataCache[ds.id] = gj;
-  }
+async function loadDataset() {
+  const res = await fetch(DATASET.url);
+  if (!res.ok) throw new Error(`Failed to load ${DATASET.url}: ${res.status}`);
+  const gj = preprocessGeoJSON(await res.json());
+  dataCache = gj;
 }
 
-function setSourceToDataset(datasetId) {
-  const gj = dataCache[datasetId];
+function setSource() {
+  const gj = dataCache;
   if (!gj) return;
 
-  // Fit bounds nicely
   const b = computeBounds(gj);
-  if (b) {
-    map.fitBounds(b, { padding: 80, duration: 650, maxZoom: 20 });
-  }
+  if (b) map.fitBounds(b, { padding: 80, duration: 650, maxZoom: 20 });
 
   if (!map.getSource("pts")) {
-    map.addSource("pts", {
-      type: "geojson",
-      data: gj
-    });
+    map.addSource("pts", { type: "geojson", data: gj });
   } else {
     map.getSource("pts").setData(gj);
   }
@@ -422,8 +386,8 @@ function ensureLayers() {
     paint: {
       "circle-radius": [
         "interpolate", ["linear"], ["zoom"],
-        15, 3,
-        18, 6
+        15, 2,
+        18, 3
       ],
       "circle-color": emoColorExpression(),
       "circle-opacity": 0.92,
@@ -436,15 +400,9 @@ function ensureLayers() {
   attachPopup();
 }
 
-function switchDataset(datasetId) {
-  setSourceToDataset(datasetId);
-  applyFilters();
-}
-
 /** =========================
  *  5) Boot
  *  ========================= */
-buildDatasetButtons();
 buildFloorButtons();
 buildLegend();
 
@@ -454,12 +412,10 @@ map.on("load", async () => {
     return;
   }
 
-  await loadAllDatasets();
-  setSourceToDataset(currentDatasetId);
+  await loadDataset();
+  setSource();
   ensureLayers();
 });
 </script>
 </body>
 </html>
-
-
